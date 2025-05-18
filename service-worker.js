@@ -6,16 +6,17 @@ const CACHE_NAME = 'webrtc-mqtt-chat-v1';
 const PRECACHE_RESOURCES = [
   '/',
   '/index.html',
+  '/offline.html',
   '/manifest.json',
   '/favicon.ico',
-  '/icons/icon-192x192.png',
-  '/icons/icon-512x512.png',
+  '/icons/icon-192-192.png',
+  '/icons/icon-512-512.png',
   '/icons/maskable-icon.png'
 ];
 
 // Resources to cache from CDNs that we want available offline
 const CDN_RESOURCES = [
-  'https://cdnjs.cloudflare.com/ajax/libs/mqtt/4.3.7/mqtt.min.js'
+  'https://unpkg.com/mqtt@5.13.0/dist/mqtt.min.js'
 ];
 
 // Install event - cache core app shell
@@ -119,9 +120,8 @@ self.addEventListener('push', event => {
   const data = event.data ? event.data.json() : {};
   const title = data.title || 'New Message';
   const options = {
-    body: data.body || 'Someone sent you a message',
-    icon: '/icons/icon-192x192.png',
-    badge: '/icons/notification-badge.png',
+    body: data.body || 'New Bitcoin price update!',
+    icon: 'icons/icon-192-192.png',
     vibrate: [100, 50, 100],
     data: {
       url: data.url || '/'
