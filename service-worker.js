@@ -4,14 +4,14 @@ const CACHE_NAME = 'webrtc-mqtt-chat-v1';
 
 // Resources to cache immediately when the service worker installs
 const PRECACHE_RESOURCES = [
-  '/',
-  '/index.html',
-  '/offline.html',
-  '/manifest.json',
-  '/favicon.ico',
-  '/icons/icon-192-192.png',
-  '/icons/icon-512-512.png',
-  '/icons/maskable-icon.png'
+  './',
+  './index.html',
+  './offline.html',
+  './manifest.json',
+  './icons/favicon.ico',
+  './icons/icon-192-192.png',
+  './icons/icon-512-512.png',
+  './icons/maskable-icon.png'
 ];
 
 // Resources to cache from CDNs that we want available offline

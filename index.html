@@ -316,6 +316,8 @@
                            peerConnection.connectionState === 'failed') {
                     messageInput.disabled = true;
                     sendBtn.disabled = true;
+                    //remove messages
+                    messagesContainer.innerHTML = '';
                 }
             };
             
