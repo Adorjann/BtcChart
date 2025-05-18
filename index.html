@@ -1,0 +1,507 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+     <base href="./">
+    <meta charset="UTF-8">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Your App Name">
+    <link rel="apple-touch-icon" href="/icons/icon-192-192.png">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Information about Bitcoin price">
+    <meta name="theme-color" content="#4CAF50">
+    <title>Information about Bitcoin price</title>
+    <link rel="manifest" href="manifest.json">
+    <link rel="icon" href="/icons/icon-192-192.png" sizes="192x192" type="image/png">
+    <link rel="apple-touch-icon" href="/icons/icon-192x192.png">
+    <script src="https://unpkg.com/mqtt@5.13.0/dist/mqtt.min.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .container {
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+        }
+        .setup-panel {
+            background-color: #f0f0f0;
+            padding: 15px;
+            border-radius: 5px;
+            margin-bottom: 15px;
+        }
+        .chat-container {
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+        }
+        .message-container {
+            flex-grow: 1;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+            padding: 10px;
+            margin-bottom: 10px;
+            overflow-y: auto;
+            max-height: 60vh;
+        }
+        .message {
+            margin-bottom: 8px;
+            padding: 8px;
+            border-radius: 5px;
+        }
+        .local-message {
+            background-color: #DCF8C6;
+            margin-left: 40px;
+            text-align: right;
+        }
+        .remote-message {
+            background-color: #ECECEC;
+            margin-right: 40px;
+        }
+        .input-container {
+            display: flex;
+            margin-top: 10px;
+        }
+        input[type="text"] {
+            flex-grow: 1;
+            padding: 10px;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+        }
+        button {
+            padding: 10px 15px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            margin-left: 5px;
+            cursor: pointer;
+        }
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        .status {
+            color: #666;
+            font-style: italic;
+            margin-bottom: 10px;
+        }
+        .error {
+            color: red;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>WebRTC Chat with MQTT Signaling</h1>
+        
+        <div class="setup-panel">
+            <h3>Connection Setup</h3>
+            <div>
+                <label for="roomId">Room ID:</label>
+                <input type="text" id="roomId" value="webrtc-chat-demo">
+                <button id="createBtn">Create/Join Room</button>
+            </div>
+            <div class="status" id="connectionStatus">Not connected</div>
+        </div>
+        
+        <div class="chat-container">
+            <div class="message-container" id="messages"></div>
+            <div class="input-container">
+                <input type="text" id="messageInput" placeholder="Type a message..." disabled>
+                <button id="sendBtn" disabled>Send</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Configuration
+        const mqttConfig = {
+            host: 'broker.emqx.io',
+            port: 8084,
+            path: '/mqtt',
+            protocol: 'wss'
+        };
+        
+        // WebRTC configuration
+        const rtcConfig = {
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' },
+                { urls: 'stun:stun1.l.google.com:19302' }
+            ]
+        };
+        
+        // DOM elements
+        const roomIdInput = document.getElementById('roomId');
+        const createBtn = document.getElementById('createBtn');
+        const messageInput = document.getElementById('messageInput');
+        const sendBtn = document.getElementById('sendBtn');
+        const messagesContainer = document.getElementById('messages');
+        const connectionStatus = document.getElementById('connectionStatus');
+        
+        // Variables
+        let mqttClient;
+        let peerConnection;
+        let dataChannel;
+        let roomId;
+        let clientId;
+        let isInitiator = false;
+        let offlineQueue = [];
+        let isOnline = navigator.onLine;
+        
+        // Check online status
+        function updateOnlineStatus() {
+            isOnline = navigator.onLine;
+            if (!isOnline) {
+                updateStatus('You are offline. Messages will be queued until reconnection.', true);
+            } else {
+                updateStatus('You are back online!');
+                // Try to reconnect and send queued messages
+                if (offlineQueue.length > 0 && dataChannel && dataChannel.readyState === 'open') {
+                    processOfflineQueue();
+                }
+            }
+        }
+        
+        window.addEventListener('online', updateOnlineStatus);
+        window.addEventListener('offline', updateOnlineStatus);
+        
+        // Process messages that were queued while offline
+        function processOfflineQueue() {
+            if (offlineQueue.length > 0) {
+                updateStatus(`Sending ${offlineQueue.length} queued message(s)...`);
+                
+                while (offlineQueue.length > 0) {
+                    const message = offlineQueue.shift();
+                    if (dataChannel && dataChannel.readyState === 'open') {
+                        dataChannel.send(message);
+                    } else {
+                        // If data channel is not ready, put the message back in the queue
+                        offlineQueue.unshift(message);
+                        break;
+                    }
+                }
+                
+                // If we still have messages, request background sync
+                if (offlineQueue.length > 0 && 'serviceWorker' in navigator && 'SyncManager' in window) {
+                    navigator.serviceWorker.ready.then(registration => {
+                        registration.sync.register('sync-messages');
+                    });
+                }
+            }
+        }
+        
+        // Handle messages from service worker
+        navigator.serviceWorker.addEventListener('message', event => {
+            if (event.data && event.data.type === 'sync-message') {
+                const message = event.data.message;
+                if (dataChannel && dataChannel.readyState === 'open') {
+                    dataChannel.send(message.text);
+                    displayMessage(message.text, true);
+                }
+            }
+        });
+        
+        // Create a unique client ID
+        clientId = 'client-' + Math.random().toString(36).substr(2, 9);
+        
+        // Connect to MQTT broker
+        function connectToMQTT() {
+            const url = `${mqttConfig.protocol}://${mqttConfig.host}:${mqttConfig.port}${mqttConfig.path}`;
+            
+            mqttClient = mqtt.connect(url, {
+                clientId: clientId,
+                clean: true
+            });
+            
+            mqttClient.on('connect', () => {
+                updateStatus('Connected to MQTT broker');
+                roomId = roomIdInput.value;
+                
+                // Subscribe to signaling channel
+                const signalingTopic = `webrtc/${roomId}/signaling`;
+                mqttClient.subscribe(signalingTopic, (err) => {
+                    if (err) {
+                        updateStatus('Failed to subscribe to signaling channel', true);
+                        return;
+                    }
+                    
+                    updateStatus('Subscribed to signaling channel');
+                    
+                    // Check if we are the first one in the room
+                    const presenceTopic = `webrtc/${roomId}/presence`;
+                    mqttClient.subscribe(presenceTopic);
+                    
+                    // Publish our presence
+                    mqttClient.publish(presenceTopic, JSON.stringify({
+                        clientId: clientId,
+                        timestamp: Date.now()
+                    }), { retain: true });
+                    
+                    // Wait a bit to see if there's anyone else
+                    setTimeout(() => {
+                        if (!isInitiator) {
+                            isInitiator = true;
+                            updateStatus('You are the first one here. Waiting for someone to join...');
+                        }
+                    }, 1000);
+                });
+            });
+            
+            mqttClient.on('message', (topic, message) => {
+                const msg = JSON.parse(message.toString());
+                
+                if (topic.includes('/presence')) {
+                    // Handle presence messages
+                    if (msg.clientId !== clientId && !isInitiator) {
+                        updateStatus('Joining existing room...');
+                        createPeerConnection();
+                    }
+                } else if (topic.includes('/signaling')) {
+                    // Ignore our own messages
+                    if (msg.sender === clientId) return;
+                    
+                    // Handle signaling messages
+                    switch (msg.type) {
+                        case 'offer':
+                            handleOffer(msg);
+                            break;
+                        case 'answer':
+                            handleAnswer(msg);
+                            break;
+                        case 'ice-candidate':
+                            handleIceCandidate(msg);
+                            break;
+                        case 'ready':
+                            if (isInitiator) {
+                                createPeerConnection();
+                            }
+                            break;
+                    }
+                }
+            });
+            
+            mqttClient.on('error', (error) => {
+                updateStatus(`MQTT Error: ${error.message}`, true);
+            });
+        }
+        
+        // Create WebRTC peer connection
+        function createPeerConnection() {
+            peerConnection = new RTCPeerConnection(rtcConfig);
+            
+            // Set up ICE candidate handling
+            peerConnection.onicecandidate = (event) => {
+                if (event.candidate) {
+                    sendSignalingMessage({
+                        type: 'ice-candidate',
+                        candidate: event.candidate
+                    });
+                }
+            };
+            
+            // Connection state changes
+            peerConnection.onconnectionstatechange = () => {
+                updateStatus(`WebRTC connection state: ${peerConnection.connectionState}`);
+                
+                if (peerConnection.connectionState === 'connected') {
+                    messageInput.disabled = false;
+                    sendBtn.disabled = false;
+                    updateStatus('WebRTC connection established! You can now chat.');
+                } else if (peerConnection.connectionState === 'disconnected' || 
+                           peerConnection.connectionState === 'failed') {
+                    messageInput.disabled = true;
+                    sendBtn.disabled = true;
+                }
+            };
+            
+            // Set up data channel
+            if (isInitiator) {
+                dataChannel = peerConnection.createDataChannel('chat');
+                setupDataChannel();
+                
+                // Create and send an offer
+                peerConnection.createOffer()
+                    .then(offer => peerConnection.setLocalDescription(offer))
+                    .then(() => {
+                        sendSignalingMessage({
+                            type: 'offer',
+                            offer: peerConnection.localDescription
+                        });
+                    })
+                    .catch(error => {
+                        updateStatus(`Error creating offer: ${error}`, true);
+                    });
+            } else {
+                // If not initiator, we'll receive the data channel
+                peerConnection.ondatachannel = (event) => {
+                    dataChannel = event.channel;
+                    setupDataChannel();
+                };
+                
+                // Signal that we're ready to receive an offer
+                sendSignalingMessage({ type: 'ready' });
+            }
+        }
+        
+        // Set up the data channel event handlers
+        function setupDataChannel() {
+            dataChannel.onopen = () => {
+                messageInput.disabled = false;
+                sendBtn.disabled = false;
+                updateStatus('Chat data channel opened');
+            };
+            
+            dataChannel.onclose = () => {
+                messageInput.disabled = true;
+                sendBtn.disabled = true;
+                updateStatus('Chat data channel closed');
+            };
+            
+            dataChannel.onmessage = (event) => {
+                displayMessage(event.data, false);
+            };
+            
+            dataChannel.onerror = (error) => {
+                updateStatus(`Data channel error: ${error}`, true);
+            };
+        }
+        
+        // Handle incoming WebRTC offer
+        function handleOffer(msg) {
+            peerConnection.setRemoteDescription(new RTCSessionDescription(msg.offer))
+                .then(() => peerConnection.createAnswer())
+                .then(answer => peerConnection.setLocalDescription(answer))
+                .then(() => {
+                    sendSignalingMessage({
+                        type: 'answer',
+                        answer: peerConnection.localDescription
+                    });
+                })
+                .catch(error => {
+                    updateStatus(`Error handling offer: ${error}`, true);
+                });
+        }
+        
+        // Handle incoming WebRTC answer
+        function handleAnswer(msg) {
+            peerConnection.setRemoteDescription(new RTCSessionDescription(msg.answer))
+                .catch(error => {
+                    updateStatus(`Error handling answer: ${error}`, true);
+                });
+        }
+        
+        // Handle incoming ICE candidate
+        function handleIceCandidate(msg) {
+            peerConnection.addIceCandidate(new RTCIceCandidate(msg.candidate))
+                .catch(error => {
+                    updateStatus(`Error adding ICE candidate: ${error}`, true);
+                });
+        }
+        
+        // Send signaling message through MQTT
+        function sendSignalingMessage(message) {
+            message.sender = clientId;
+            mqttClient.publish(`webrtc/${roomId}/signaling`, JSON.stringify(message));
+        }
+        
+        // Display a message in the chat
+        function displayMessage(message, isLocal) {
+            const messageElement = document.createElement('div');
+            messageElement.textContent = message;
+            messageElement.className = `message ${isLocal ? 'local-message' : 'remote-message'}`;
+            messagesContainer.appendChild(messageElement);
+            messagesContainer.scrollTop = messagesContainer.scrollHeight;
+        }
+        
+        // Update status display
+        function updateStatus(status, isError = false) {
+            connectionStatus.textContent = status;
+            connectionStatus.className = isError ? 'status error' : 'status';
+        }
+        
+        // Send a chat message
+        function sendMessage() {
+            const message = messageInput.value.trim();
+            if (message) {
+                if (dataChannel && dataChannel.readyState === 'open' && isOnline) {
+                    dataChannel.send(message);
+                    displayMessage(message, true);
+                    messageInput.value = '';
+                } else if (!isOnline) {
+                    // If offline, queue the message
+                    offlineQueue.push(message);
+                    displayMessage(`(Queued) ${message}`, true);
+                    updateStatus(`Message queued. You have ${offlineQueue.length} pending message(s).`);
+                    messageInput.value = '';
+                    
+                    // Store in IndexedDB if available
+                    storeOfflineMessage(message);
+                }
+            }
+        }
+        
+        // Store offline messages in IndexedDB for persistence
+        function storeOfflineMessage(message) {
+            if ('indexedDB' in window) {
+                const request = indexedDB.open('webrtc-chat-store', 1);
+                
+                request.onupgradeneeded = event => {
+                    const db = event.target.result;
+                    if (!db.objectStoreNames.contains('outbox')) {
+                        db.createObjectStore('outbox', { keyPath: 'id', autoIncrement: true });
+                    }
+                };
+                
+                request.onsuccess = event => {
+                    const db = event.target.result;
+                    const tx = db.transaction('outbox', 'readwrite');
+                    const store = tx.objectStore('outbox');
+                    
+                    store.add({
+                        text: message,
+                        timestamp: Date.now(),
+                        roomId: roomId
+                    });
+                };
+            }
+        }
+        
+        // Event listeners
+        createBtn.addEventListener('click', () => {
+            if (!mqttClient) {
+                connectToMQTT();
+                createBtn.disabled = true;
+                roomIdInput.disabled = true;
+            }
+        });
+        
+        sendBtn.addEventListener('click', sendMessage);
+        
+        messageInput.addEventListener('keypress', (event) => {
+            if (event.key === 'Enter') {
+                sendMessage();
+            }
+        });
+    </script>
+    
+    <!-- Service Worker Registration -->
+    <script>
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', () => {
+                navigator.serviceWorker.register('/service-worker.js')
+                    .then(registration => {
+                        console.log('ServiceWorker registration successful with scope: ', registration.scope);
+                    })
+                    .catch(error => {
+                        console.log('ServiceWorker registration failed: ', error);
+                    });
+            });
+        }
+    </script>
+</body>
+</html>
