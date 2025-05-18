@@ -1,6 +1,6 @@
 // service-worker.js for WebRTC Chat with MQTT Signaling PWA
 
-const CACHE_NAME = 'webrtc-mqtt-chat-v2';
+const CACHE_NAME = 'webrtc-mqtt-chat-v3';
 
 // Resources to cache immediately when the service worker installs
 const PRECACHE_RESOURCES = [
